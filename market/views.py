@@ -9,11 +9,12 @@ from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.response import Response
 from rest_framework import serializers, status
 from django.db.models import Q, Count, Case, When, IntegerField,Sum
-
+from datetime import timedelta
+from django.utils import timezone
 from .models import (
     Product, ProductImage, ProductCategory,
     Negotiation, OfferRound, Deal, Block, AnalyticsEvent,
-    WishlistItem, UserProfile
+    WishlistItem, UserProfile,NegotiationMessage,MessageReport,UserBlock
 )
 from rest_framework import generics, permissions
 
@@ -21,7 +22,8 @@ from .serializers import (
 
     ProductSerializer, ProductCreateSerializer, ProductImageSerializer, CategorySerializer,
     NegotiationSerializer, OfferRoundSerializer, DealSerializer, BlockSerializer,
-    AnalyticsEventSerializer, WishlistItemSerializer, UserProfileSerializer,UserRegisterSerializer
+    AnalyticsEventSerializer, WishlistItemSerializer, UserProfileSerializer,UserRegisterSerializer ,
+    NegotiationMessageSerializer
 )
 from .permissions import IsOwnerOrReadOnly
 from .utils import record_event
@@ -35,7 +37,7 @@ class ProductViewSet(viewsets.ModelViewSet):
     queryset = Product.objects.select_related("seller", "category")
     filterset_fields = ["condition", "currency", "location_city", "location_state", "location_country", "seller", "category"]
     search_fields = ["title", "description"]
-    ordering_fields = ["created_at", "price", "view_count"]
+    ordering_fields = ["created_at", "price", "view_count","product_view_count"]
 
     def get_queryset(self):
         if self.action == "list":
@@ -157,11 +159,6 @@ class ProductViewSet(viewsets.ModelViewSet):
         return Response(response_data, status=status.HTTP_200_OK)
 
 
-class RegisterView(generics.CreateAPIView):
-    queryset = User.objects.all()
-    serializer_class = UserRegisterSerializer
-    permission_classes = [permissions.AllowAny]
-
 
 class ProductImageViewSet(viewsets.ModelViewSet):
     queryset = ProductImage.objects.select_related("product")
@@ -185,6 +182,13 @@ class ProductImageViewSet(viewsets.ModelViewSet):
         except Product.DoesNotExist:
             raise serializers.ValidationError({"product": "not found or not owner"})
         serializer.save(product=product)
+
+
+class RegisterView(generics.CreateAPIView):
+    queryset = User.objects.all()
+    serializer_class = UserRegisterSerializer
+    permission_classes = [permissions.AllowAny]
+
 
 
 class CategoryViewSet(viewsets.ModelViewSet):
@@ -408,6 +412,103 @@ class NegotiationViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.
         neg.status = Negotiation.Status.CANCELED
         neg.save(update_fields=["status", "updated_at"])
         return Response(NegotiationSerializer(neg).data)
+
+
+    @action(detail=True, methods=["get"], permission_classes=[IsAuthenticated])
+    def messages(self, request, pk=None):
+        negotiation = self.get_object()
+        if not negotiation.is_party(request.user):
+            return Response({"detail": "Not a party to this negotiation."}, status=403)
+
+        msgs = negotiation.messages.select_related("sender")
+        return Response(NegotiationMessageSerializer(msgs, many=True).data)
+
+    @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated])
+    def send_message(self, request, pk=None):
+        negotiation = self.get_object()
+        if not negotiation.is_party(request.user):
+            return Response({"detail": "Not a party to this negotiation."}, status=403)
+
+        profile, _ = UserProfile.objects.get_or_create(user=request.user)
+        if profile.is_blocked_from_messages:
+            return Response(
+                {"detail": f"You are blocked from sending messages until {profile.blocked_until}"},
+                status=403,
+            )
+
+        message_text = request.data.get("message", "").strip()
+        if not message_text:
+            return Response({"detail": "Message cannot be empty"}, status=400)
+        
+        if UserBlock.objects.filter(
+            negotiation=negotiation,
+            blocked_user=request.user,
+            blocked_by__in=[negotiation.seller, negotiation.buyer],
+            blocked_until__gt=timezone.now()
+        ).exists():
+            return Response({"detail": "You are temporarily blocked from messaging this user in this negotiation."}, status=403)
+
+        msg = NegotiationMessage.objects.create(
+            negotiation=negotiation,
+            sender=request.user,
+            message=message_text
+        )
+        return Response(NegotiationMessageSerializer(msg).data, status=201)
+
+
+    @action(detail=True, methods=["post"], url_path="report-message")
+    def report_message(self, request, pk=None):
+        negotiation = self.get_object()
+        if not negotiation.is_party(request.user):
+            return Response({"detail": "Not a party to this negotiation."}, status=403)
+
+        message_id = request.data.get("message_id")
+        reason = request.data.get("reason", "")
+
+        try:
+            msg = negotiation.messages.get(id=message_id)
+        except NegotiationMessage.DoesNotExist:
+            return Response({"detail": "Message not found"}, status=404)
+
+        # prevent duplicate reports
+        if MessageReport.objects.filter(message=msg, reporter=request.user).exists():
+            return Response({"detail": "Already reported"}, status=400)
+
+        MessageReport.objects.create(message=msg, reporter=request.user, reason=reason)
+
+        # ✅ check if this reporter has reported the same sender > 3 times in this negotiation
+        cutoff = timezone.now() - timedelta(days=3)
+        report_count = MessageReport.objects.filter(
+            message__negotiation=negotiation,
+            message__sender=msg.sender,
+            reporter=request.user,
+            created_at__gte=cutoff
+        ).count()
+
+        if report_count >= 3:
+            UserBlock.objects.update_or_create(
+                negotiation=negotiation,
+                blocked_user=msg.sender,
+                blocked_by=request.user,
+                defaults={"blocked_until": timezone.now() + timedelta(days=3)}
+            )
+
+        return Response({"detail": "Message reported."}, status=201)
+    
+    def _check_and_block_user(self, sender):
+        """Block sender for 7 days if 3+ distinct reports in 3 days"""
+        cutoff = timezone.now() - timedelta(days=3)
+        distinct_reporters = (
+            MessageReport.objects.filter(message__sender=sender, created_at__gte=cutoff)
+            .values("reporter")
+            .distinct()
+            .count()
+        )
+        if distinct_reporters >= 3:
+            profile, _ = UserProfile.objects.get_or_create(user=sender)
+            profile.blocked_until = timezone.now() + timedelta(days=7)
+            profile.save(update_fields=["blocked_until"])
+
 
 
 class DealViewSet(viewsets.ReadOnlyModelViewSet):

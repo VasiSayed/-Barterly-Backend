@@ -28,8 +28,16 @@ class UserProfile(TimeStampedModel):
     country = models.CharField(max_length=120, blank=True)
     pin_code = models.CharField(max_length=12, blank=True)
 
+    blocked_until = models.DateTimeField(null=True, blank=True)
+
     def __str__(self):
         return f"Profile<{self.user_id}>"
+
+    @property
+    def is_blocked_from_messages(self):
+        from django.utils import timezone
+        return self.blocked_until and self.blocked_until > timezone.now()
+
 
 
 class ProductCategory(TimeStampedModel):
@@ -168,3 +176,39 @@ class WishlistItem(TimeStampedModel):
 
     class Meta:
         unique_together = (("user", "product"),)
+
+
+class NegotiationMessage(models.Model):
+    negotiation = models.ForeignKey(
+        Negotiation, on_delete=models.CASCADE, related_name="messages"
+    )
+    sender = models.ForeignKey(UserRef, on_delete=models.CASCADE)
+    message = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at"]
+
+
+class MessageReport(models.Model):
+    message = models.ForeignKey(
+        NegotiationMessage, on_delete=models.CASCADE, related_name="reports"
+    )
+    reporter = models.ForeignKey(UserRef, on_delete=models.CASCADE)
+    reason = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("message", "reporter")
+
+
+
+class UserBlock(models.Model):
+    negotiation = models.ForeignKey(Negotiation, on_delete=models.CASCADE, related_name="user_blocks")
+    blocked_user = models.ForeignKey(UserRef, on_delete=models.CASCADE, related_name="blocked_in_negotiations")
+    blocked_by = models.ForeignKey(UserRef, on_delete=models.CASCADE, related_name="blocked_others_in_negotiations")
+    blocked_until = models.DateTimeField()
+
+    class Meta:
+        unique_together = ("negotiation", "blocked_user", "blocked_by")
+

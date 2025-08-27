@@ -3,7 +3,7 @@ from rest_framework import serializers
 from .models import (
     Product, ProductImage, ProductCategory,
     Negotiation, OfferRound, Deal, Block, AnalyticsEvent,
-    WishlistItem, UserProfile
+    WishlistItem, UserProfile ,NegotiationMessage
 )
 
 User = get_user_model()
@@ -88,6 +88,15 @@ class ProductImageSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProductImage
         fields = ["id", "image", "alt_text", "sort_order"]
+
+
+class NegotiationMessageSerializer(serializers.ModelSerializer):
+    sender = UserPublicSerializer(read_only=True)
+
+    class Meta:
+        model = NegotiationMessage
+        fields = ["id", "negotiation", "sender", "message", "created_at"]
+        read_only_fields = ["id", "sender", "created_at"]
 
 
 
