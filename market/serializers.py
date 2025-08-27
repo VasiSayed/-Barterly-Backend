@@ -42,21 +42,47 @@ class ProductSerializer(serializers.ModelSerializer):
         ]
 
 
+
 class UserRegisterSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True)
 
+    # Profile fields
+    full_name = serializers.CharField(required=False, allow_blank=True)
+    phone = serializers.CharField(required=False, allow_blank=True)
+    address_line1 = serializers.CharField(required=False, allow_blank=True)
+    address_line2 = serializers.CharField(required=False, allow_blank=True)
+    city = serializers.CharField(required=False, allow_blank=True)
+    state = serializers.CharField(required=False, allow_blank=True)
+    country = serializers.CharField(required=False, allow_blank=True)
+    pin_code = serializers.CharField(required=False, allow_blank=True)
+
     class Meta:
         model = User
-        fields = ["id", "username", "email", "password"]
+        fields = [
+            "id", "username", "email", "password",
+            "full_name", "phone",
+            "address_line1", "address_line2",
+            "city", "state", "country", "pin_code"
+        ]
 
     def create(self, validated_data):
-        user = User.objects.create_user(
-            username=validated_data["username"],
-            email=validated_data.get("email", ""),
-            password=validated_data["password"],
-        )
-        return user
+        profile_fields = {
+            key: validated_data.pop(key, "")
+            for key in [
+                "full_name", "phone", "address_line1", "address_line2",
+                "city", "state", "country", "pin_code"
+            ]
+        }
+        password = validated_data.pop("password")
+        user = User.objects.create_user(password=password, **validated_data)
 
+        # Use get_or_create instead of create
+        profile, created = UserProfile.objects.get_or_create(user=user)
+        for field, value in profile_fields.items():
+            setattr(profile, field, value)
+        profile.save()
+
+        return user
 
 class ProductImageSerializer(serializers.ModelSerializer):
     class Meta:
